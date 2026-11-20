@@ -131,7 +131,9 @@ function originOf(req) {
   return `${proto}://${host}`;
 }
 
+/** A path segment percent-decoded; most segments carry no escape, so they skip the decoder. */
 function decodeSegment(segment) {
+  if (segment.indexOf('%') < 0) return segment;
   try {
     return decodeURIComponent(segment);
   } catch {
@@ -760,7 +762,10 @@ function handleRest(req, res, path, query, body) {
   const state = authOf(req);
   if (state !== 'ok') return refuseAuth(res, state);
   const rest = path.length > 7 ? path.slice(8) : '';
-  const seg = rest === '' ? [] : rest.split('/').filter((part, index, all) => part !== '' || index < all.length - 1).map(decodeSegment);
+  // One pass over the segments: a trailing slash drops its empty last segment, inner empties stay.
+  const seg = rest === '' ? [] : rest.split('/');
+  if (seg.length > 0 && seg[seg.length - 1] === '') seg.pop();
+  for (let i = 0; i < seg.length; i += 1) seg[i] = decodeSegment(seg[i]);
   const ctx = {
     method: req.method,
     seg,
@@ -874,7 +879,15 @@ async function main() {
   const server = createServer({ keepAliveTimeout: 120_000, headersTimeout: 125_000, requestTimeout: 0, noDelay: true }, onRequest);
   server.keepAliveTimeout = 120_000;
   server.on('clientError', (err, socket) => {
-    if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 26\r\nConnection: close\r\n\r\n{"message":"Bad Request"}\n');
+    if (!socket.writable) return;
+    const body = JSON.stringify({ message: 'Bad Request', documentation_url: 'https://docs.github.com/rest', status: '400' });
+    socket.end(
+      'HTTP/1.1 400 Bad Request\r\n' +
+        `Content-Type: ${JSON_TYPE}\r\n` +
+        `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+        `X-GitHub-Request-Id: ${requestId()}\r\n` +
+        `Connection: close\r\n\r\n${body}`,
+    );
   });
   const standalonePort = process.env.MAKEFUN_FORGE_PORT;
   if (ENV_URL === '' && !standalonePort) {
